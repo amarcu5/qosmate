@@ -1417,6 +1417,46 @@ try_load_and_fix_config() {
     done
     IFS="$DEFAULT_IFS"
 
+    # Paired bridge shaping keeps the classifier in the bridge/conntrack path.
+    NO_EXPORT='' config_get DOWNLOAD_DEVICE settings DOWNLOAD_DEVICE ''
+    export NFT_FAMILY=inet
+    if [ -n "$DOWNLOAD_DEVICE" ]; then
+        [ "$ROOT_QDISC" = cake ] && [ "$AUTORATE_ENABLED" != 1 ] &&
+        [ "$NFT_HOOK" = forward ] || {
+            error_out "DOWNLOAD_DEVICE currently requires CAKE and the forward hook (autorate added in the next patch)."
+            return 1
+        }
+        [ "$DOWNLOAD_DEVICE" != "$WAN" ] &&
+        [ -d "/sys/class/net/$WAN/brport" ] &&
+        [ -d "/sys/class/net/$DOWNLOAD_DEVICE/brport" ] &&
+        [ "$(cat /sys/class/net/$WAN/type)" = 1 ] &&
+        [ "$(cat /sys/class/net/$DOWNLOAD_DEVICE/type)" = 1 ] &&
+        [ "$(readlink -f /sys/class/net/$WAN/master)" = "$(readlink -f /sys/class/net/$DOWNLOAD_DEVICE/master)" ] || {
+            error_out "DOWNLOAD_DEVICE must be a different Ethernet port on the WAN bridge."
+            return 1
+        }
+        [ "$(uci -q get firewall.@defaults[0].flow_offloading)" != 1 ] &&
+        [ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" != 1 ] || {
+            error_out "Paired bridge shaping requires flow offloading disabled."
+            return 1
+        }
+        [ "$(ls /sys/class/net/"$WAN"/master/brif | wc -l)" = 2 ] || {
+            error_out "DOWNLOAD_DEVICE requires a two-port bridge."
+            return 1
+        }
+        for gate in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
+            [ "$(cat /proc/sys/net/bridge/$gate 2>/dev/null)" != 1 ] || {
+                error_out "Paired bridge shaping requires $gate disabled."
+                return 1
+            }
+        done
+        modprobe nf_conntrack_bridge && modprobe nft_meta_bridge || {
+            error_out "Paired bridge shaping requires kmod-nft-bridge and native bridge conntrack."
+            return 1
+        }
+        export NFT_FAMILY=bridge
+    fi
+
     # Ensure valid values for DOWNRATE, UPRATE
     # A rate of 0 is valid and means "do not shape this direction" (same convention as
     # sqm-scripts and ACKRATE=0): actually shaping to 0 would kill the link. Empty,
@@ -1611,7 +1651,7 @@ try_migrate_config() {
 is_qosmate_active() {
     [ -n "$1" ] || { error_out "is_qosmate_active: specify WAN device"; return 250; }
     tc qdisc show dev "$1" 2>/dev/null | grep -qE "hfsc|cake|htb" && \
-        nft -t list table inet dscptag >/dev/null 2>&1
+        nft -t list table "${NFT_FAMILY:-inet}" dscptag >/dev/null 2>&1
 }
 
 # Validate a single nftables file
@@ -1665,7 +1705,7 @@ validate_inline_rules() {
     
     # Create temporary file with context
     {
-        printf '%s\n\t%s\n' "table inet __qosmate_validation_ctx {" \
+        printf '%s\n\t%s\n' "table ${NFT_FAMILY:-inet} __qosmate_validation_ctx {" \
             "chain __dscptag_init_ctx {"
         cat "$file_path"
         printf '\n\t%s\n%s\n' "}" "}"
@@ -1941,7 +1981,13 @@ start_service() {
     # Save the current WAN interface to a temporary file
     printf '%s\n' "$WAN" > /tmp/qosmate_wan
 
-    /bin/sh "$QOSMATE_MAIN_SCRIPT" || { error_out "Failed to start qosmate."; return 1; }
+    [ -z "$DOWNLOAD_DEVICE" ] || printf '%s\n' "$DOWNLOAD_DEVICE" > /tmp/qosmate_download
+
+    /bin/sh "$QOSMATE_MAIN_SCRIPT" || {
+        error_out "Failed to start qosmate."
+        [ -z "$DOWNLOAD_DEVICE" ] || DISABLE_ON_STOP=0 stop_service
+        return 1
+    }
 
     /etc/init.d/firewall reload &&
     enabled || /etc/init.d/qosmate enable || return 1
@@ -1986,6 +2032,20 @@ stop_service() {
     rm -f "$QOSMATE_HOTPLUG_SCRIPT"
     rm -f /usr/share/nftables.d/ruleset-post/dscptag.nft
 
+    # Read the applied device, not a subsequently edited UCI setting.
+    OLD_DOWNLOAD=$(cat /tmp/qosmate_download 2>/dev/null)
+    if [ -n "$OLD_DOWNLOAD" ]; then
+        tc qdisc del dev "$OLD_DOWNLOAD" root > /dev/null 2>&1
+        if [ -f "$QOSMATE_RUN_DIR/download_ctinfo_created" ]; then
+            tc filter del dev "$OLD_DOWNLOAD" egress pref 49152 handle 1 matchall > /dev/null 2>&1
+        fi
+        if [ -f "$QOSMATE_RUN_DIR/download_clsact_created" ] &&
+           [ -z "$(tc filter show dev "$OLD_DOWNLOAD" ingress)" ] &&
+           [ -z "$(tc filter show dev "$OLD_DOWNLOAD" egress)" ]; then
+            tc qdisc del dev "$OLD_DOWNLOAD" clsact > /dev/null 2>&1
+        fi
+    fi
+
     ## Delete the old qdiscs and IFB associated with the old WAN interface
     tc qdisc del dev "$OLD_WAN" root > /dev/null 2>&1
     tc qdisc del dev ifb-"$OLD_WAN" root > /dev/null 2>&1
@@ -1995,9 +2055,10 @@ stop_service() {
     ip link del ifb-"$OLD_WAN" 2>/dev/null
 
     nft destroy table inet dscptag
+    [ -z "$OLD_DOWNLOAD" ] || nft destroy table bridge dscptag
 
     # Remove temporary/runtime files
-    rm -f /tmp/qosmate_wan
+    rm -f /tmp/qosmate_wan /tmp/qosmate_download
     rm -rf "$QOSMATE_RUN_DIR"
 
     print_msg "Reloading network service..."
@@ -2605,7 +2666,7 @@ health_check() {
     esac
 
     # Check nftables configuration
-    if nft list table inet dscptag >/dev/null 2>&1; then
+    if nft list table "${NFT_FAMILY:-inet}" dscptag >/dev/null 2>&1; then
         status="${status}nft:ok;"
     else
         status="${status}nft:failed;"
@@ -2620,7 +2681,7 @@ health_check() {
         errors=$((errors + 1))
     else
         [ "$SHAPE_EGRESS" = 1 ] && tc_devs="$WAN"
-        [ "$SHAPE_INGRESS" = 1 ] && tc_devs="$tc_devs ifb-$WAN"
+        [ "$SHAPE_INGRESS" = 1 ] && tc_devs="$tc_devs ${DOWNLOAD_DEVICE:-ifb-$WAN}"
         for tc_dev in $tc_devs; do
             tc qdisc show dev "$tc_dev" 2>/dev/null | grep -E -q "hfsc|cake|htb" || tc_ok=0
         done

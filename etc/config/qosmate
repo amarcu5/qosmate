@@ -3,6 +3,8 @@ config global 'global'
 
 config settings 'settings'
 	option WAN 'eth1'
+	# Optional LAN-facing physical egress port of a two-port transparent bridge.
+	# option DOWNLOAD_DEVICE 'eth0'
 	option DOWNRATE '90000'
 	option UPRATE '45000'
 	option ROOT_QDISC 'hfsc'

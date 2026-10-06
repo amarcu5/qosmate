@@ -1050,7 +1050,7 @@ if [ -s "$INLINE_FILE" ]; then
     TMP_CHECK_FILE="$(mktemp)"
 
     {
-        printf '%s\n\t%s\n' "table inet __qosmate_sh_ctx {" "chain __dscptag_sh_ctx {"
+        printf '%s\n\t%s\n' "table ${NFT_FAMILY:-inet} __qosmate_sh_ctx {" "chain __dscptag_sh_ctx {"
         cat "$INLINE_FILE"
         printf "\n\t%s\n%s\n" "}" "}"
     } > "$TMP_CHECK_FILE"
@@ -1089,11 +1089,11 @@ define first10s = $FIRST10S
 define wan = "$WAN"
 
 
-table inet dscptag # forward declaration so the next command always works
+table $NFT_FAMILY dscptag # forward declaration so the next command always works
 
-delete table inet dscptag # clear all the rules
+delete table $NFT_FAMILY dscptag # clear all the rules
 
-table inet dscptag {
+table $NFT_FAMILY dscptag {
 
     map priomap { type dscp : classid ;
         elements =  {ef : 1:11, cs5 : 1:11, cs6 : 1:11, cs7 : 1:11,
@@ -1235,7 +1235,17 @@ DSCPEOF
 
 ## Set up ctinfo downstream shaping
 
-if [ "$SHAPE_INGRESS" = 1 ]; then
+if [ "$SHAPE_INGRESS" = 1 ] && [ -n "$DOWNLOAD_DEVICE" ]; then
+    LAN="$DOWNLOAD_DEVICE"
+    # Conntrack has attached at bridge prerouting before this physical egress.
+    # Reuse an existing clsact, but reserve one filter preference for QoSmate.
+    if ! tc qdisc show dev "$LAN" | grep -q 'qdisc clsact '; then
+        tc qdisc add dev "$LAN" clsact || exit 1
+        touch /tmp/qosmate/download_clsact_created
+    fi
+    tc filter add dev "$LAN" egress pref 49152 handle 1 protocol all matchall action ctinfo dscp 63 128 continue || exit 1
+    touch /tmp/qosmate/download_ctinfo_created
+elif [ "$SHAPE_INGRESS" = 1 ]; then
     print_msg "" "Setting up ctinfo downstream shaping..."
 
     # Set up ingress handle for WAN interface
@@ -1573,6 +1583,9 @@ setup_cake() {
     local CAKE_QDISC_EGR CAKE_QDISC_IGR CAKE_OPTS
     select_cake_qdisc "$WAN"
     CAKE_QDISC_EGR="$REPLY"
+    if [ -n "$DOWNLOAD_DEVICE" ] && [ "$SHAPE_INGRESS" = 1 ]; then
+        select_cake_qdisc "$LAN"
+    fi
     CAKE_QDISC_IGR="$REPLY"
 
     # Egress (Upload) CAKE setup
