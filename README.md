@@ -220,6 +220,42 @@ All cake settings are described in the tc-cake man. **Note: Link layer settings 
 | EXTRA_PARAMETERS_INGRESS | Additional parameters for ingress CAKE qdisc. For advanced tuning, allows passing custom options directly to CAKE.                                             | string                                     |           |
 | EXTRA_PARAMETERS_EGRESS  | Additional parameters for egress CAKE qdisc. Similar to INGRESS, but for outgoing traffic.                                                                     | string                                     |           |
 
+### Optional paired egress for two-port transparent bridges
+
+Set `settings.DOWNLOAD_DEVICE` to the LAN-facing physical bridge port and
+`settings.WAN` to the upstream-facing port. Leave DOWNLOAD_DEVICE unset for
+the existing routed WAN ingress/IFB path. The configured devices must be
+distinct Ethernet members of the same two-port bridge.
+
+Paired mode requires `ROOT_QDISC=cake`, `advanced.NFT_HOOK=forward`, flow
+offloading disabled, and OpenWrt's `kmod-nft-bridge` (including native bridge
+conntrack). Keep bridge-nf-call-iptables and bridge-nf-call-ip6tables disabled.
+Configure CAKE NAT_INGRESS and NAT_EGRESS to 0: the bridge preserves client
+addresses. Host isolation and all download/upload CAKE settings remain in use.
+
+The existing classifier runs at bridge forward, classifies LAN-to-WAN
+packets and stores DSCP in conntrack. Download uses ctinfo at DOWNLOAD_DEVICE
+egress before its root CAKE. Download keeps CAKE's logical ingress
+accounting flag independently of the physical egress hook. Neither an IFB
+nor routed-firewall bridge
+traversal is required. A WAN-initiated connection starts with its default
+class until an outbound packet is classified, as in ordinary routed QoSmate.
+
+`cake.USE_MQ=1` selects cake_mq independently for each physical device, with
+ordinary CAKE fallback if unavailable. Autorate targets WAN and DOWNLOAD_DEVICE
+and determines the active CAKE type per device. Forward is a traversal
+classification hook; physical shaping happens later at tc egress. HFSC, HTB,
+hybrid and arbitrary nft hooks are outside paired mode's supported scope.
+
+QoSmate owns the root queues. Its LAN egress ctinfo uses reserved preference
+49152 / handle 1; reserve this slot. Existing clsact is preserved; a clsact
+created by QoSmate is removed only if no unrelated filters remain.
+No LuCI control for DOWNLOAD_DEVICE is included in this backend feature.
+
+CAKE host isolation remains per MQ child, so unequal TX queue placement can
+defeat whole-link fairness between hosts. Use ordinary CAKE for strict host
+fairness; verify MQ queue distribution and driver behaviour on your hardware.
+
 ### Advanced Settings
 
 | **Config option**      | **Description**                                                                                                                                                                                                                                                                  | **Type**                         | **Default**        | 
