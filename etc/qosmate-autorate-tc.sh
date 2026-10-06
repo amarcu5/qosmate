@@ -35,9 +35,13 @@ _autorate_calculate_gamerate() {
 }
 
 _autorate_update_cake() {
-    local new_rate="$1" dev="$2"
-    tc qdisc change dev "$dev" root "$CAKE_TYPE" bandwidth "${new_rate}kbit" 2>/dev/null || {
-        logger -t qosmate-autorate "ERROR: tc qdisc change failed for $dev ($CAKE_TYPE)"
+    local new_rate="$1" dev="$2" cake_type
+    # Physical paired devices need not have the same queue count. Read the
+    # active root on the requested device rather than a global setup hint.
+    cake_type=$(tc qdisc show dev "$dev" | awk '$1 == "qdisc" && $4 == "root" && ($2 == "cake" || $2 == "cake_mq") { print $2; exit }')
+    [ -n "$cake_type" ] || return 1
+    tc qdisc change dev "$dev" root "$cake_type" bandwidth "${new_rate}kbit" 2>/dev/null || {
+        logger -t qosmate-autorate "ERROR: tc qdisc change failed for $dev ($cake_type)"
         return 1
     }
 }

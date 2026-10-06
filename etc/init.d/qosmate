@@ -1421,9 +1421,8 @@ try_load_and_fix_config() {
     NO_EXPORT='' config_get DOWNLOAD_DEVICE settings DOWNLOAD_DEVICE ''
     export NFT_FAMILY=inet
     if [ -n "$DOWNLOAD_DEVICE" ]; then
-        [ "$ROOT_QDISC" = cake ] && [ "$AUTORATE_ENABLED" != 1 ] &&
-        [ "$NFT_HOOK" = forward ] || {
-            error_out "DOWNLOAD_DEVICE currently requires CAKE and the forward hook (autorate added in the next patch)."
+        [ "$ROOT_QDISC" = cake ] && [ "$NFT_HOOK" = forward ] || {
+            error_out "DOWNLOAD_DEVICE currently requires CAKE and the forward hook."
             return 1
         }
         [ "$DOWNLOAD_DEVICE" != "$WAN" ] &&
@@ -2057,6 +2056,10 @@ stop_service() {
     nft destroy table inet dscptag
     [ -z "$OLD_DOWNLOAD" ] || nft destroy table bridge dscptag
 
+    # A paired final stop has no live autorate state; keep snapshots on restart.
+    if [ -n "$OLD_DOWNLOAD" ] && [ "$DISABLE_ON_STOP" != 0 ]; then
+        rm -f /tmp/qosmate-autorate-state /tmp/qosmate-autorate-history
+    fi
     # Remove temporary/runtime files
     rm -f /tmp/qosmate_wan /tmp/qosmate_download
     rm -rf "$QOSMATE_RUN_DIR"

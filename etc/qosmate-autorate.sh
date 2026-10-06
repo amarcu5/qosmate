@@ -36,6 +36,7 @@ load_autorate_config() {
     
     # Settings section
     config_get WAN settings WAN
+    config_get DOWNLOAD_DEVICE settings DOWNLOAD_DEVICE
     config_get UPRATE settings UPRATE
     config_get DOWNRATE settings DOWNRATE
     config_get ROOT_QDISC settings ROOT_QDISC
@@ -255,11 +256,7 @@ run_daemon() {
         exit 1
     fi
 
-    # Read active cake qdisc type (written by qosmate.sh at setup time)
-    CAKE_TYPE=$(cat /tmp/qosmate/cake_type 2>/dev/null)
-    : "${CAKE_TYPE:=cake}"
-    
-    local wan_iface="$WAN" lan_iface="ifb-$WAN"
+    local wan_iface="$WAN" lan_iface="${DOWNLOAD_DEVICE:-ifb-$WAN}"
     local ul_rate="$AUTORATE_BASE_UL" dl_rate="$AUTORATE_BASE_DL"
     local prev_ul_bytes=0 prev_dl_bytes=0 curr_ul_bytes=0 curr_dl_bytes=0
     local achieved_ul=0 achieved_dl=0 baseline_latency=0 baseline_samples=0
